@@ -4227,6 +4227,154 @@ void PNaClTargetInfo::getGCCRegAliases(const GCCRegAlias *&Aliases,
 }
 } // end anonymous namespace.
 
+namespace {
+
+class Tile64TargetInfo : public TargetInfo {
+//  static const Builtin::Info BuiltinInfo[];
+  static const char * const GCCRegNames[];
+
+  std::string CPU;
+  std::string ABI;
+public:
+  Tile64TargetInfo(const std::string &triple): TargetInfo(triple) {
+    //SigAtomicType
+
+    BigEndian = false;
+    noSignedCharForObjCBool();
+
+    DescriptionString = "e-p:32:32-i1:8:8-i8:8:8-i16:16:16-i32:32:32-i64:64:64-"
+                        "f32:32:32-f64:64:64-v32:32:32-a0:0:64-n8:16:32";
+    //CXXABI -- Itanium OK?
+    PlatformName = "tile64";
+  }
+
+  virtual unsigned getFloatEvalMethod() const {
+    //TODO: what should it be?
+    return 0;
+  }
+
+  virtual void getTargetDefines(const LangOptions &Opts,
+                                MacroBuilder &Builder) const {
+    DefineStd(Builder, "tile64", Opts);
+
+    Builder.defineMacro("__linux__");
+    Builder.defineMacro("__LITTLE_ENDIAN");
+    Builder.defineMacro("__LITTLE_ENDIAN__");
+  }
+
+  virtual void getTargetBuiltins(const Builtin::Info *&Records,
+                                 unsigned &NumRecords) const;
+
+  virtual bool isCLZForZeroUndef() const {
+    return false;
+  }
+
+  virtual BuiltinVaListKind getBuiltinVaListKind() const {
+    return TargetInfo::VoidPtrBuiltinVaList;
+  }
+
+  virtual const char *getClobbers() const {
+    //FIXME: implement
+    return "";
+  }
+
+	//TODO: check default implementation of getCFStringSection,
+	//getNSStringSection, getNSStringNonFragileABISection and below...
+  virtual std::string isValidSectionSpecifier(StringRef SR) const {
+    //Here implement checking of section specifiers if needed
+    return "";
+  }
+
+  virtual void getDefaultFeatures(llvm::StringMap<bool> &Features) const {
+    Features[ABI] = true;
+    Features[CPU] = true;
+  }
+
+  virtual const char *getABI() const {
+    return ABI.c_str();
+  }
+
+  virtual bool setCPU(const std::string &Name) {
+    if(Name != "tile64")
+      return false;
+
+    CPU = Name;
+    return true;
+  }
+
+  virtual bool setABI(const std::string &Name) {
+    if(Name != "tile64")
+      return false;
+
+    ABI = Name;
+    return true;
+  }
+
+  virtual int getEHDataRegisterNumber(unsigned RegNo) const {
+    //FIXME: implement
+    return -1;
+  }
+
+  virtual const char *getStaticInitSectionSpecifier() const {
+    //FIXME: implement
+    return 0;
+  }
+
+  virtual void getGCCRegNames(const char * const *&Names,
+                              unsigned &NumNames) const;
+
+  virtual void getGCCRegAliases(const GCCRegAlias *&Aliases,
+                                unsigned &NumAliases) const;
+
+  //TODO: what is getGCCAddlRegNames for?
+
+  virtual bool validateAsmConstraint(const char *&Name,
+                                     TargetInfo::ConstraintInfo &info) const {
+    //FIXME: implement
+    return false;
+  }
+
+};
+
+//const Builtin::Info Tile64TargetInfo::BuiltinInfo[] = {
+  //FIXME: implement
+//};
+
+const char * const Tile64TargetInfo::GCCRegNames[] = {
+  "r0",  "r1",  "r2",  "r3",  "r4",  "r5",  "r6",  "r7",  "r8",  "r9",
+  "r10", "r11", "r12", "r13", "r14", "r15", "r16", "r17", "r18", "r19",
+  "r20", "r21", "r22", "r23", "r24", "r25", "r26", "r27", "r28", "r29",
+  "r30", "r31", "r32", "r33", "r34", "r35", "r36", "r37", "r38", "r39",
+  "r40", "r41", "r42", "r43", "r44", "r45", "r46", "r47", "r48", "r49",
+  "r50", "r51",
+  "r52", "tp",  "sp",  "lr", 
+  "sn",  "idn0", "idn1", "udn0", "udn1", "udn2", "udn3", "zero"
+};
+
+void Tile64TargetInfo::getTargetBuiltins(const Builtin::Info *&Records,
+                                         unsigned &NumRecords) const {
+  //FIXME: implement
+  Records = 0; //BuiltinInfo;
+  NumRecords = 0; //clang::T64::LastTSBuiltin - Builtin::FirstTSBuiltin;
+}
+
+
+void Tile64TargetInfo::getGCCRegNames(const char * const *&Names,
+                                      unsigned &NumNames) const {
+  Names = GCCRegNames;
+  NumNames = llvm::array_lengthof(GCCRegNames);
+}
+
+void Tile64TargetInfo::getGCCRegAliases(const GCCRegAlias *&Aliases,
+                                        unsigned &NumAliases) const {
+  //there are no aliases.
+  Aliases = 0;
+  NumAliases = 0;
+}
+
+
+} // end anonymous namespace
+
 
 //===----------------------------------------------------------------------===//
 // Driver code
@@ -4468,6 +4616,9 @@ static TargetInfo *AllocateTarget(const std::string &T) {
     default:
       return new X86_64TargetInfo(T);
     }
+
+  case llvm::Triple::tile64:
+    return new Tile64TargetInfo(T);
   }
 }
 

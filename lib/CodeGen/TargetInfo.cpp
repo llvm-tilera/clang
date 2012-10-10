@@ -3938,6 +3938,64 @@ llvm::Value *HexagonABIInfo::EmitVAArg(llvm::Value *VAListAddr, QualType Ty,
   return AddrTyped;
 }
 
+//===----------------------------------------------------------------------===//
+// Tile64 ABI Implementation.
+//===----------------------------------------------------------------------===//
+
+namespace {
+class Tile64ABIInfo : public ABIInfo {
+public:
+  Tile64ABIInfo(CodeGen::CodeGenTypes &CGT) : ABIInfo(CGT) {}
+
+  ABIArgInfo classifyReturnType(QualType RetTy) const {
+    if (RetTy->isVoidType())
+      return ABIArgInfo::getIgnore();
+
+    if (isAggregateTypeForABI(RetTy)) {
+      uint64_t Size = getContext().getTypeSize(RetTy);
+      return ABIArgInfo::getDirect(llvm::IntegerType::get(getVMContext(),Size));
+    }
+
+    // Treat an enum type as its underlying type.
+    if (const EnumType *EnumTy = RetTy->getAs<EnumType>())
+      RetTy = EnumTy->getDecl()->getIntegerType();
+
+    return ABIArgInfo::getDirect();
+  }
+
+  ABIArgInfo classifyArgumentType(QualType Ty) const {
+    if (isAggregateTypeForABI(Ty))
+      return ABIArgInfo::getIndirect(0);
+
+    // Treat an enum type as its underlying type.
+    if (const EnumType *EnumTy = Ty->getAs<EnumType>())
+      Ty = EnumTy->getDecl()->getIntegerType();
+
+    return ABIArgInfo::getDirect();
+  }
+
+  virtual void computeInfo(CGFunctionInfo &FI) const {
+    FI.getReturnInfo() = classifyReturnType(FI.getReturnType());
+    for (CGFunctionInfo::arg_iterator it = FI.arg_begin(), ie = FI.arg_end();
+         it != ie; ++it)
+      it->info = classifyArgumentType(it->type);
+  }
+
+  virtual llvm::Value *EmitVAArg(llvm::Value *VAListAddr, QualType Ty,
+                                 CodeGenFunction &CGF) const {
+    //handled by the llvm backend
+    return 0;
+  }
+
+};
+
+class Tile64TargetCodeGenInfo : public TargetCodeGenInfo {
+public:
+  Tile64TargetCodeGenInfo(CodeGen::CodeGenTypes &CGT)
+        : TargetCodeGenInfo(new Tile64ABIInfo(CGT)) {}
+};
+
+}
 
 const TargetCodeGenInfo &CodeGenModule::getTargetCodeGenInfo() {
   if (TheTargetCodeGenInfo)
@@ -4041,5 +4099,8 @@ const TargetCodeGenInfo &CodeGenModule::getTargetCodeGenInfo() {
   }
   case llvm::Triple::hexagon:
     return *(TheTargetCodeGenInfo = new HexagonTargetCodeGenInfo(Types));
+
+  case llvm::Triple::tile64:
+    return *(TheTargetCodeGenInfo = new Tile64TargetCodeGenInfo(Types));
   }
 }
