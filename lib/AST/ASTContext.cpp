@@ -24,6 +24,7 @@
 #include "clang/AST/ASTMutationListener.h"
 #include "clang/AST/RecordLayout.h"
 #include "clang/AST/Mangle.h"
+#include "clang/AST/Comment.h"
 #include "clang/Basic/Builtins.h"
 #include "clang/Basic/SourceManager.h"
 #include "clang/Basic/TargetInfo.h"
@@ -355,21 +356,75 @@ const RawComment *ASTContext::getRawCommentForAnyRedecl(
   return RC;
 }
 
+static void addRedeclaredMethods(const ObjCMethodDecl *ObjCMethod,
+                   SmallVectorImpl<const NamedDecl *> &Redeclared) {
+  const DeclContext *DC = ObjCMethod->getDeclContext();
+  if (const ObjCImplDecl *IMD = dyn_cast<ObjCImplDecl>(DC)) {
+    const ObjCInterfaceDecl *ID = IMD->getClassInterface();
+    if (!ID)
+      return;
+    // Add redeclared method here.
+    for (const ObjCCategoryDecl *ClsExtDecl = ID->getFirstClassExtension();
+         ClsExtDecl; ClsExtDecl = ClsExtDecl->getNextClassExtension()) {
+      if (ObjCMethodDecl *RedeclaredMethod =
+            ClsExtDecl->getMethod(ObjCMethod->getSelector(),
+                                  ObjCMethod->isInstanceMethod()))
+        Redeclared.push_back(RedeclaredMethod);
+    }
+  }
+}
+
+comments::FullComment *ASTContext::cloneFullComment(comments::FullComment *FC,
+                                                    const Decl *D) const {
+  comments::DeclInfo *ThisDeclInfo = new (*this) comments::DeclInfo;
+  ThisDeclInfo->CommentDecl = D;
+  ThisDeclInfo->IsFilled = false;
+  ThisDeclInfo->fill();
+  ThisDeclInfo->CommentDecl = FC->getDecl();
+  comments::FullComment *CFC =
+    new (*this) comments::FullComment(FC->getBlocks(),
+                                      ThisDeclInfo);
+  return CFC;
+  
+}
+
 comments::FullComment *ASTContext::getCommentForDecl(
                                               const Decl *D,
                                               const Preprocessor *PP) const {
   D = adjustDeclToTemplate(D);
+  
   const Decl *Canonical = D->getCanonicalDecl();
   llvm::DenseMap<const Decl *, comments::FullComment *>::iterator Pos =
       ParsedComments.find(Canonical);
-  if (Pos != ParsedComments.end())
+  
+  if (Pos != ParsedComments.end()) {
+    if (Canonical != D) {
+      comments::FullComment *FC = Pos->second;
+      comments::FullComment *CFC = cloneFullComment(FC, D);
+      return CFC;
+    }
     return Pos->second;
-
+  }
+  
   const Decl *OriginalDecl;
+  
   const RawComment *RC = getRawCommentForAnyRedecl(D, &OriginalDecl);
-  if (!RC)
+  if (!RC) {
+    if (isa<ObjCMethodDecl>(D) || isa<FunctionDecl>(D)) {
+      SmallVector<const NamedDecl*, 8> Overridden;
+      if (const ObjCMethodDecl *OMD = dyn_cast<ObjCMethodDecl>(D))
+        addRedeclaredMethods(OMD, Overridden);
+      getOverriddenMethods(dyn_cast<NamedDecl>(D), Overridden);
+      for (unsigned i = 0, e = Overridden.size(); i < e; i++) {
+        if (comments::FullComment *FC = getCommentForDecl(Overridden[i], PP)) {
+          comments::FullComment *CFC = cloneFullComment(FC, D);
+          return CFC;
+        }
+      }
+    }
     return NULL;
-
+  }
+  
   // If the RawComment was attached to other redeclaration of this Decl, we
   // should parse the comment in context of that other Decl.  This is important
   // because comments can contain references to parameter names which can be
@@ -1026,8 +1081,9 @@ void ASTContext::addOverriddenMethod(const CXXMethodDecl *Method,
   OverriddenMethods[Method].push_back(Overridden);
 }
 
-void ASTContext::getOverriddenMethods(const NamedDecl *D,
-                               SmallVectorImpl<const NamedDecl *> &Overridden) {
+void ASTContext::getOverriddenMethods(
+                      const NamedDecl *D,
+                      SmallVectorImpl<const NamedDecl *> &Overridden) const {
   assert(D);
 
   if (const CXXMethodDecl *CXXMethod = dyn_cast<CXXMethodDecl>(D)) {
@@ -3478,6 +3534,12 @@ QualType ASTContext::getPointerDiffType() const {
   return getFromTargetType(Target->getPtrDiffType(0));
 }
 
+/// \brief Return the unique type for "pid_t" defined in
+/// <sys/types.h>. We need this to compute the correct type for vfork().
+QualType ASTContext::getProcessIDType() const {
+  return getFromTargetType(Target->getProcessIDType());
+}
+
 //===----------------------------------------------------------------------===//
 //                              Type Operators
 //===----------------------------------------------------------------------===//
@@ -4425,7 +4487,13 @@ std::string ASTContext::getObjCEncodingForBlock(const BlockExpr *Expr) const {
   QualType BlockTy =
       Expr->getType()->getAs<BlockPointerType>()->getPointeeType();
   // Encode result type.
-  getObjCEncodingForType(BlockTy->getAs<FunctionType>()->getResultType(), S);
+  if (getLangOpts().EncodeExtendedBlockSig)
+    getObjCEncodingForMethodParameter(Decl::OBJC_TQ_None,
+                            BlockTy->getAs<FunctionType>()->getResultType(),
+                            S, true /*Extended*/);
+  else
+    getObjCEncodingForType(BlockTy->getAs<FunctionType>()->getResultType(),
+                           S);
   // Compute size of all parameters.
   // Start with computing size of a pointer in number of bytes.
   // FIXME: There might(should) be a better way of doing this computation!
@@ -4460,7 +4528,11 @@ std::string ASTContext::getObjCEncodingForBlock(const BlockExpr *Expr) const {
         PType = PVDecl->getType();
     } else if (PType->isFunctionType())
       PType = PVDecl->getType();
-    getObjCEncodingForType(PType, S);
+    if (getLangOpts().EncodeExtendedBlockSig)
+      getObjCEncodingForMethodParameter(Decl::OBJC_TQ_None, PType,
+                                      S, true /*Extended*/);
+    else
+      getObjCEncodingForType(PType, S);
     S += charUnitsToString(ParmOffset);
     ParmOffset += getObjCEncodingTypeSize(PType);
   }
@@ -7150,6 +7222,9 @@ static QualType DecodeTypeFromStr(const char *&Str, const ASTContext &Context,
       Error = ASTContext::GE_Missing_ucontext;
       return QualType();
     }
+    break;
+  case 'p':
+    Type = Context.getProcessIDType();
     break;
   }
 

@@ -1018,6 +1018,41 @@ bool Sema::isCurrentClassName(const IdentifierInfo &II, Scope *,
     return false;
 }
 
+/// \brief Determine whether the given class is a base class of the given
+/// class, including looking at dependent bases.
+static bool findCircularInheritance(const CXXRecordDecl *Class,
+                                    const CXXRecordDecl *Current) {
+  SmallVector<const CXXRecordDecl*, 8> Queue;
+
+  Class = Class->getCanonicalDecl();
+  while (true) {
+    for (CXXRecordDecl::base_class_const_iterator I = Current->bases_begin(),
+                                                  E = Current->bases_end();
+         I != E; ++I) {
+      CXXRecordDecl *Base = I->getType()->getAsCXXRecordDecl();
+      if (!Base)
+        continue;
+
+      Base = Base->getDefinition();
+      if (!Base)
+        continue;
+
+      if (Base->getCanonicalDecl() == Class)
+        return true;
+
+      Queue.push_back(Base);
+    }
+
+    if (Queue.empty())
+      return false;
+
+    Current = Queue.back();
+    Queue.pop_back();
+  }
+
+  return false;
+}
+
 /// \brief Check the validity of a C++ base class specifier.
 ///
 /// \returns a new CXXBaseSpecifier if well-formed, emits diagnostics
@@ -1044,13 +1079,32 @@ Sema::CheckBaseSpecifier(CXXRecordDecl *Class,
       << TInfo->getTypeLoc().getSourceRange();
     EllipsisLoc = SourceLocation();
   }
-  
-  if (BaseType->isDependentType())
+
+  SourceLocation BaseLoc = TInfo->getTypeLoc().getBeginLoc();
+
+  if (BaseType->isDependentType()) {
+    // Make sure that we don't have circular inheritance among our dependent
+    // bases. For non-dependent bases, the check for completeness below handles
+    // this.
+    if (CXXRecordDecl *BaseDecl = BaseType->getAsCXXRecordDecl()) {
+      if (BaseDecl->getCanonicalDecl() == Class->getCanonicalDecl() ||
+          ((BaseDecl = BaseDecl->getDefinition()) &&
+           findCircularInheritance(Class, BaseDecl))) {
+        Diag(BaseLoc, diag::err_circular_inheritance)
+          << BaseType << Context.getTypeDeclType(Class);
+
+        if (BaseDecl->getCanonicalDecl() != Class->getCanonicalDecl())
+          Diag(BaseDecl->getLocation(), diag::note_previous_decl)
+            << BaseType;
+            
+        return 0;
+      }
+    }
+
     return new (Context) CXXBaseSpecifier(SpecifierRange, Virtual,
                                           Class->getTagKind() == TTK_Class,
                                           Access, TInfo, EllipsisLoc);
-
-  SourceLocation BaseLoc = TInfo->getTypeLoc().getBeginLoc();
+  }
 
   // Base specifiers must be record types.
   if (!BaseType->isRecordType()) {
@@ -4739,6 +4793,19 @@ namespace {
   };
 }
 
+/// \brief Check whether any most overriden method from MD in Methods
+static bool CheckMostOverridenMethods(const CXXMethodDecl *MD,
+                   const llvm::SmallPtrSet<const CXXMethodDecl *, 8>& Methods) {
+  if (MD->size_overridden_methods() == 0)
+    return Methods.count(MD->getCanonicalDecl());
+  for (CXXMethodDecl::method_iterator I = MD->begin_overridden_methods(),
+                                      E = MD->end_overridden_methods();
+       I != E; ++I)
+    if (CheckMostOverridenMethods(*I, Methods))
+      return true;
+  return false;
+}
+
 /// \brief Member lookup function that determines whether a given C++
 /// method overloads virtual methods in a base class without overriding any,
 /// to be used with CXXRecordDecl::lookupInBases().
@@ -4770,7 +4837,7 @@ static bool FindHiddenVirtualMethod(const CXXBaseSpecifier *Specifier,
       if (!Data.S->IsOverload(Data.Method, MD, false))
         return true;
       // Collect the overload only if its hidden.
-      if (!Data.OverridenAndUsingBaseMethods.count(MD))
+      if (!CheckMostOverridenMethods(MD, Data.OverridenAndUsingBaseMethods))
         overloadedMethods.push_back(MD);
     }
   }
@@ -4779,6 +4846,17 @@ static bool FindHiddenVirtualMethod(const CXXBaseSpecifier *Specifier,
     Data.OverloadedMethods.append(overloadedMethods.begin(),
                                    overloadedMethods.end());
   return foundSameNameMethod;
+}
+
+/// \brief Add the most overriden methods from MD to Methods
+static void AddMostOverridenMethods(const CXXMethodDecl *MD,
+                         llvm::SmallPtrSet<const CXXMethodDecl *, 8>& Methods) {
+  if (MD->size_overridden_methods() == 0)
+    Methods.insert(MD->getCanonicalDecl());
+  for (CXXMethodDecl::method_iterator I = MD->begin_overridden_methods(),
+                                      E = MD->end_overridden_methods();
+       I != E; ++I)
+    AddMostOverridenMethods(*I, Methods);
 }
 
 /// \brief See if a method overloads virtual methods in a base class without
@@ -4801,14 +4879,11 @@ void Sema::DiagnoseHiddenVirtualMethods(CXXRecordDecl *DC, CXXMethodDecl *MD) {
   // by 'using' in a set. A base method not in this set is hidden.
   for (DeclContext::lookup_result res = DC->lookup(MD->getDeclName());
        res.first != res.second; ++res.first) {
-    if (CXXMethodDecl *MD = dyn_cast<CXXMethodDecl>(*res.first))
-      for (CXXMethodDecl::method_iterator I = MD->begin_overridden_methods(),
-                                          E = MD->end_overridden_methods();
-           I != E; ++I)
-        Data.OverridenAndUsingBaseMethods.insert((*I)->getCanonicalDecl());
+    NamedDecl *ND = *res.first;
     if (UsingShadowDecl *shad = dyn_cast<UsingShadowDecl>(*res.first))
-      if (CXXMethodDecl *MD = dyn_cast<CXXMethodDecl>(shad->getTargetDecl()))
-        Data.OverridenAndUsingBaseMethods.insert(MD->getCanonicalDecl());
+      ND = shad->getTargetDecl();
+    if (CXXMethodDecl *MD = dyn_cast<CXXMethodDecl>(ND))
+      AddMostOverridenMethods(MD, Data.OverridenAndUsingBaseMethods);
   }
 
   if (DC->lookupInBases(&FindHiddenVirtualMethod, &Data, Paths) &&
@@ -5574,15 +5649,15 @@ Decl *Sema::ActOnStartNamespaceDef(Scope *NamespcScope,
 
     if (!PrevNS) {
       UsingDirectiveDecl* UD
-        = UsingDirectiveDecl::Create(Context, CurContext,
+        = UsingDirectiveDecl::Create(Context, Parent,
                                      /* 'using' */ LBrace,
                                      /* 'namespace' */ SourceLocation(),
                                      /* qualifier */ NestedNameSpecifierLoc(),
                                      /* identifier */ SourceLocation(),
                                      Namespc,
-                                     /* Ancestor */ CurContext);
+                                     /* Ancestor */ Parent);
       UD->setImplicit();
-      CurContext->addDecl(UD);
+      Parent->addDecl(UD);
     }
   }
 
@@ -5811,7 +5886,8 @@ static bool TryNamespaceTypoCorrection(Sema &S, LookupResult &R, Scope *Sc,
     if (DeclContext *DC = S.computeDeclContext(SS, false))
       S.Diag(IdentLoc, diag::err_using_directive_member_suggest)
         << Ident << DC << CorrectedQuotedStr << SS.getRange()
-        << FixItHint::CreateReplacement(IdentLoc, CorrectedStr);
+        << FixItHint::CreateReplacement(Corrected.getCorrectionRange(),
+                                        CorrectedStr);
     else
       S.Diag(IdentLoc, diag::err_using_directive_suggest)
         << Ident << CorrectedQuotedStr
@@ -6810,28 +6886,6 @@ Decl *Sema::ActOnNamespaceAliasDef(Scope *S,
   return AliasDecl;
 }
 
-namespace {
-  /// \brief Scoped object used to handle the state changes required in Sema
-  /// to implicitly define the body of a C++ member function;
-  class ImplicitlyDefinedFunctionScope {
-    Sema &S;
-    Sema::ContextRAII SavedContext;
-    
-  public:
-    ImplicitlyDefinedFunctionScope(Sema &S, CXXMethodDecl *Method)
-      : S(S), SavedContext(S, Method) 
-    {
-      S.PushFunctionScope();
-      S.PushExpressionEvaluationContext(Sema::PotentiallyEvaluated);
-    }
-    
-    ~ImplicitlyDefinedFunctionScope() {
-      S.PopExpressionEvaluationContext();
-      S.PopFunctionScopeInfo();
-    }
-  };
-}
-
 Sema::ImplicitExceptionSpecification
 Sema::ComputeDefaultedDefaultCtorExceptionSpec(SourceLocation Loc,
                                                CXXMethodDecl *MD) {
@@ -6975,7 +7029,7 @@ void Sema::DefineImplicitDefaultConstructor(SourceLocation CurrentLocation,
   CXXRecordDecl *ClassDecl = Constructor->getParent();
   assert(ClassDecl && "DefineImplicitDefaultConstructor - invalid constructor");
 
-  ImplicitlyDefinedFunctionScope Scope(*this, Constructor);
+  SynthesizedFunctionScope Scope(*this, Constructor);
   DiagnosticErrorTrap Trap(Diags);
   if (SetCtorInitializers(Constructor, 0, 0, /*AnyErrors=*/false) ||
       Trap.hasErrorOccurred()) {
@@ -7287,7 +7341,7 @@ void Sema::DefineImplicitDestructor(SourceLocation CurrentLocation,
   if (Destructor->isInvalidDecl())
     return;
 
-  ImplicitlyDefinedFunctionScope Scope(*this, Destructor);
+  SynthesizedFunctionScope Scope(*this, Destructor);
 
   DiagnosticErrorTrap Trap(Diags);
   MarkBaseAndMemberDestructorsReferenced(Destructor->getLocation(),
@@ -7768,7 +7822,7 @@ void Sema::DefineImplicitCopyAssignment(SourceLocation CurrentLocation,
   
   CopyAssignOperator->setUsed();
 
-  ImplicitlyDefinedFunctionScope Scope(*this, CopyAssignOperator);
+  SynthesizedFunctionScope Scope(*this, CopyAssignOperator);
   DiagnosticErrorTrap Trap(Diags);
 
   // C++0x [class.copy]p30:
@@ -8309,7 +8363,7 @@ void Sema::DefineImplicitMoveAssignment(SourceLocation CurrentLocation,
   
   MoveAssignOperator->setUsed();
 
-  ImplicitlyDefinedFunctionScope Scope(*this, MoveAssignOperator);
+  SynthesizedFunctionScope Scope(*this, MoveAssignOperator);
   DiagnosticErrorTrap Trap(Diags);
 
   // C++0x [class.copy]p28:
@@ -8805,7 +8859,7 @@ void Sema::DefineImplicitCopyConstructor(SourceLocation CurrentLocation,
   CXXRecordDecl *ClassDecl = CopyConstructor->getParent();
   assert(ClassDecl && "DefineImplicitCopyConstructor - invalid constructor");
 
-  ImplicitlyDefinedFunctionScope Scope(*this, CopyConstructor);
+  SynthesizedFunctionScope Scope(*this, CopyConstructor);
   DiagnosticErrorTrap Trap(Diags);
 
   if (SetCtorInitializers(CopyConstructor, 0, 0, /*AnyErrors=*/false) ||
@@ -8988,7 +9042,7 @@ void Sema::DefineImplicitMoveConstructor(SourceLocation CurrentLocation,
   CXXRecordDecl *ClassDecl = MoveConstructor->getParent();
   assert(ClassDecl && "DefineImplicitMoveConstructor - invalid constructor");
 
-  ImplicitlyDefinedFunctionScope Scope(*this, MoveConstructor);
+  SynthesizedFunctionScope Scope(*this, MoveConstructor);
   DiagnosticErrorTrap Trap(Diags);
 
   if (SetCtorInitializers(MoveConstructor, 0, 0, /*AnyErrors=*/false) ||
@@ -9040,7 +9094,7 @@ void Sema::DefineImplicitLambdaToFunctionPointerConversion(
   
   Conv->setUsed();
   
-  ImplicitlyDefinedFunctionScope Scope(*this, Conv);
+  SynthesizedFunctionScope Scope(*this, Conv);
   DiagnosticErrorTrap Trap(Diags);
   
   // Return the address of the __invoke function.
@@ -9073,7 +9127,7 @@ void Sema::DefineImplicitLambdaToBlockPointerConversion(
 {
   Conv->setUsed();
   
-  ImplicitlyDefinedFunctionScope Scope(*this, Conv);
+  SynthesizedFunctionScope Scope(*this, Conv);
   DiagnosticErrorTrap Trap(Diags);
   
   // Copy-initialize the lambda object as needed to capture it.
@@ -9379,7 +9433,7 @@ CheckOperatorNewDeclaration(Sema &SemaRef, const FunctionDecl *FnDecl) {
 }
 
 static bool
-CheckOperatorDeleteDeclaration(Sema &SemaRef, const FunctionDecl *FnDecl) {
+CheckOperatorDeleteDeclaration(Sema &SemaRef, FunctionDecl *FnDecl) {
   // C++ [basic.stc.dynamic.deallocation]p1:
   //   A program is ill-formed if deallocation functions are declared in a
   //   namespace scope other than global scope or declared static in global 

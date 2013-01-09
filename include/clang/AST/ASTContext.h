@@ -537,6 +537,9 @@ public:
   /// preprocessor is not available.
   comments::FullComment *getCommentForDecl(const Decl *D,
                                            const Preprocessor *PP) const;
+  
+  comments::FullComment *cloneFullComment(comments::FullComment *FC,
+                                         const Decl *D) const;
 
 private:
   mutable comments::CommandTraits CommentCommandTraits;
@@ -633,8 +636,9 @@ public:
   /// the same selector and is of the same kind (class or instance).
   /// A method in an implementation is not considered as overriding the same
   /// method in the interface or its categories.
-  void getOverriddenMethods(const NamedDecl *Method,
-                            SmallVectorImpl<const NamedDecl *> &Overridden);
+  void getOverriddenMethods(
+                        const NamedDecl *Method,
+                        SmallVectorImpl<const NamedDecl *> &Overridden) const;
   
   /// \brief Notify the AST context that a new import declaration has been
   /// parsed or implicitly created within this translation unit.
@@ -1093,6 +1097,10 @@ public:
   /// \brief Return the unique type for "ptrdiff_t" (C99 7.17) defined in
   /// <stddef.h>. Pointer - pointer requires this (C99 6.5.6p9).
   QualType getPointerDiffType() const;
+
+  /// \brief Return the unique type for "pid_t" defined in
+  /// <sys/types.h>. We need this to compute the correct type for vfork().
+  QualType getProcessIDType() const;
 
   /// \brief Return the C structure type used to represent constant CFStrings.
   QualType getCFConstantStringType() const;
