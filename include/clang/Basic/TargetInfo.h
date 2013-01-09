@@ -23,6 +23,7 @@
 #include "llvm/ADT/Triple.h"
 #include "llvm/Support/DataTypes.h"
 #include "clang/Basic/AddressSpaces.h"
+#include "clang/Basic/TargetOptions.h"
 #include "clang/Basic/VersionTuple.h"
 #include "clang/Basic/Specifiers.h"
 #include <cassert>
@@ -39,7 +40,6 @@ class LangOptions;
 class MacroBuilder;
 class SourceLocation;
 class SourceManager;
-class TargetOptions;
 
 namespace Builtin { struct Info; }
 
@@ -62,6 +62,7 @@ enum TargetCXXABI {
 /// \brief Exposes information about the current target.
 ///
 class TargetInfo : public RefCountedBase<TargetInfo> {
+  llvm::IntrusiveRefCntPtr<TargetOptions> TargetOpts;
   llvm::Triple Triple;
 protected:
   // Target values set by the ctor of the actual target implementation.  Default
@@ -112,6 +113,16 @@ public:
 
   virtual ~TargetInfo();
 
+  /// \brief Retrieve the target options.
+  TargetOptions &getTargetOpts() const { 
+    assert(TargetOpts && "Missing target options");
+    return *TargetOpts; 
+  }
+
+  void setTargetOpts(TargetOptions &TargetOpts) {
+    this->TargetOpts = &TargetOpts;
+  }
+
   ///===---- Target Data Type Query Methods -------------------------------===//
   enum IntType {
     NoInt = 0,
@@ -161,7 +172,8 @@ public:
 
 protected:
   IntType SizeType, IntMaxType, UIntMaxType, PtrDiffType, IntPtrType, WCharType,
-          WIntType, Char16Type, Char32Type, Int64Type, SigAtomicType;
+          WIntType, Char16Type, Char32Type, Int64Type, SigAtomicType,
+          ProcessIDType;
 
   /// \brief Whether Objective-C's built-in boolean type should be signed char.
   ///
@@ -202,7 +214,7 @@ public:
   IntType getChar32Type() const { return Char32Type; }
   IntType getInt64Type() const { return Int64Type; }
   IntType getSigAtomicType() const { return SigAtomicType; }
-
+  IntType getProcessIDType() const { return ProcessIDType; }
 
   /// \brief Return the width (in bits) of the specified integer type enum.
   ///
@@ -506,6 +518,11 @@ public:
   bool validateInputConstraint(ConstraintInfo *OutputConstraints,
                                unsigned NumOutputs,
                                ConstraintInfo &info) const;
+  virtual bool validateConstraintModifier(StringRef /*Constraint*/,
+                                          const char /*Modifier*/,
+                                          unsigned /*Size*/) const {
+    return true;
+  }
   bool resolveSymbolicName(const char *&Name,
                            ConstraintInfo *OutputConstraints,
                            unsigned NumOutputs, unsigned &Index) const;

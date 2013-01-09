@@ -224,6 +224,25 @@ protected:
     llvm::ArrayType *ArrayTy = llvm::ArrayType::get(Ty, V.size());
     return MakeGlobal(ArrayTy, V, Name, linkage);
   }
+  /// Returns a property name and encoding string.
+  llvm::Constant *MakePropertyEncodingString(const ObjCPropertyDecl *PD,
+                                             const Decl *Container) {
+    ObjCRuntime R = CGM.getLangOpts().ObjCRuntime;
+    if ((R.getKind() == ObjCRuntime::GNUstep) &&
+        (R.getVersion() >= VersionTuple(1, 6))) {
+      std::string NameAndAttributes;
+      std::string TypeStr;
+      CGM.getContext().getObjCEncodingForPropertyDecl(PD, Container, TypeStr);
+      NameAndAttributes += '\0';
+      NameAndAttributes += TypeStr.length() + 3;
+      NameAndAttributes += TypeStr;
+      NameAndAttributes += '\0';
+      NameAndAttributes += PD->getNameAsString();
+      return llvm::ConstantExpr::getGetElementPtr(
+          CGM.GetAddrOfConstantString(NameAndAttributes), Zeros);
+    }
+    return MakeConstantString(PD->getNameAsString());
+  }
   /// Ensures that the value has the required type, by inserting a bitcast if
   /// required.  This function lets us avoid inserting bitcasts that are
   /// redundant.
@@ -514,7 +533,10 @@ public:
                                              const CGBlockInfo &blockInfo) {
     return NULLPtr;
   }
-  
+  virtual llvm::Constant *BuildRCBlockLayout(CodeGenModule &CGM,
+                                             const CGBlockInfo &blockInfo) {
+    return NULLPtr;
+  }
   virtual llvm::GlobalVariable *GetClassGlobal(const std::string &Name) {
     return 0;
   }
@@ -578,6 +600,8 @@ class CGObjCGNUstep : public CGObjCGNU {
     /// Type of an slot structure pointer.  This is returned by the various
     /// lookup functions.
     llvm::Type *SlotTy;
+  public:
+    virtual llvm::Constant *GetEHType(QualType T);
   protected:
     virtual llvm::Value *LookupIMP(CodeGenFunction &CGF,
                                    llvm::Value *&Receiver,
@@ -944,29 +968,30 @@ llvm::Value *CGObjCGNU::GetSelector(CGBuilderTy &Builder, const ObjCMethodDecl
 }
 
 llvm::Constant *CGObjCGNU::GetEHType(QualType T) {
-  if (!CGM.getLangOpts().CPlusPlus) {
-      if (T->isObjCIdType()
-          || T->isObjCQualifiedIdType()) {
-        // With the old ABI, there was only one kind of catchall, which broke
-        // foreign exceptions.  With the new ABI, we use __objc_id_typeinfo as
-        // a pointer indicating object catchalls, and NULL to indicate real
-        // catchalls
-        if (CGM.getLangOpts().ObjCRuntime.isNonFragile()) {
-          return MakeConstantString("@id");
-        } else {
-          return 0;
-        }
-      }
-
-      // All other types should be Objective-C interface pointer types.
-      const ObjCObjectPointerType *OPT =
-        T->getAs<ObjCObjectPointerType>();
-      assert(OPT && "Invalid @catch type.");
-      const ObjCInterfaceDecl *IDecl =
-        OPT->getObjectType()->getInterface();
-      assert(IDecl && "Invalid @catch type.");
-      return MakeConstantString(IDecl->getIdentifier()->getName());
+  if (T->isObjCIdType() || T->isObjCQualifiedIdType()) {
+    // With the old ABI, there was only one kind of catchall, which broke
+    // foreign exceptions.  With the new ABI, we use __objc_id_typeinfo as
+    // a pointer indicating object catchalls, and NULL to indicate real
+    // catchalls
+    if (CGM.getLangOpts().ObjCRuntime.isNonFragile()) {
+      return MakeConstantString("@id");
+    } else {
+      return 0;
+    }
   }
+
+  // All other types should be Objective-C interface pointer types.
+  const ObjCObjectPointerType *OPT = T->getAs<ObjCObjectPointerType>();
+  assert(OPT && "Invalid @catch type.");
+  const ObjCInterfaceDecl *IDecl = OPT->getObjectType()->getInterface();
+  assert(IDecl && "Invalid @catch type.");
+  return MakeConstantString(IDecl->getIdentifier()->getName());
+}
+
+llvm::Constant *CGObjCGNUstep::GetEHType(QualType T) {
+  if (!CGM.getLangOpts().CPlusPlus)
+    return CGObjCGNU::GetEHType(T);
+
   // For Objective-C++, we want to provide the ability to catch both C++ and
   // Objective-C objects in the same function.
 
@@ -1691,7 +1716,9 @@ void CGObjCGNU::GenerateProtocol(const ObjCProtocolDecl *PD) {
     std::vector<llvm::Constant*> Fields;
     ObjCPropertyDecl *property = *iter;
 
-    Fields.push_back(MakeConstantString(property->getNameAsString()));
+
+    Fields.push_back(MakePropertyEncodingString(property, PD));
+
     Fields.push_back(llvm::ConstantInt::get(Int8Ty,
                 property->getPropertyAttributes()));
     Fields.push_back(llvm::ConstantInt::get(Int8Ty, 0));
@@ -1944,7 +1971,7 @@ llvm::Constant *CGObjCGNU::GeneratePropertyList(const ObjCImplementationDecl *OI
     bool isSynthesized = (propertyImpl->getPropertyImplementation() == 
         ObjCPropertyImplDecl::Synthesize);
 
-    Fields.push_back(MakeConstantString(property->getNameAsString()));
+    Fields.push_back(MakePropertyEncodingString(property, OID));
     Fields.push_back(llvm::ConstantInt::get(Int8Ty,
                 property->getPropertyAttributes()));
     Fields.push_back(llvm::ConstantInt::get(Int8Ty, isSynthesized));
@@ -2046,7 +2073,7 @@ void CGObjCGNU::GenerateClass(const ObjCImplementationDecl *OID) {
     Context.getASTObjCInterfaceLayout(SuperClassDecl).getSize().getQuantity();
   // For non-fragile ivars, set the instance size to 0 - {the size of just this
   // class}.  The runtime will then set this to the correct value on load.
-  if (CGM.getContext().getLangOpts().ObjCRuntime.isNonFragile()) {
+  if (CGM.getLangOpts().ObjCRuntime.isNonFragile()) {
     instanceSize = 0 - (instanceSize - superInstanceSize);
   }
 
@@ -2061,7 +2088,7 @@ void CGObjCGNU::GenerateClass(const ObjCImplementationDecl *OID) {
       // Get the offset
       uint64_t BaseOffset = ComputeIvarBaseOffset(CGM, OID, IVD);
       uint64_t Offset = BaseOffset;
-      if (CGM.getContext().getLangOpts().ObjCRuntime.isNonFragile()) {
+      if (CGM.getLangOpts().ObjCRuntime.isNonFragile()) {
         Offset = BaseOffset - superInstanceSize;
       }
       llvm::Constant *OffsetValue = llvm::ConstantInt::get(IntTy, Offset);
@@ -2523,7 +2550,7 @@ void CGObjCGNU::EmitTryStmt(CodeGenFunction &CGF,
   // Unlike the Apple non-fragile runtimes, which also uses
   // unwind-based zero cost exceptions, the GNU Objective C runtime's
   // EH support isn't a veneer over C++ EH.  Instead, exception
-  // objects are created by __objc_exception_throw and destroyed by
+  // objects are created by objc_exception_throw and destroyed by
   // the personality function; this avoids the need for bracketing
   // catch handlers with calls to __blah_begin_catch/__blah_end_catch
   // (or even _Unwind_DeleteException), but probably doesn't
@@ -2548,7 +2575,9 @@ void CGObjCGNU::EmitThrowStmt(CodeGenFunction &CGF,
     ExceptionAsObject = CGF.ObjCEHValueStack.back();
   }
   ExceptionAsObject = CGF.Builder.CreateBitCast(ExceptionAsObject, IdTy);
-  CGF.EmitCallOrInvoke(ExceptionThrowFn, ExceptionAsObject);
+  llvm::CallSite Throw =
+      CGF.EmitCallOrInvoke(ExceptionThrowFn, ExceptionAsObject);
+  Throw.setDoesNotReturn();
   CGF.Builder.CreateUnreachable();
   CGF.Builder.ClearInsertionPoint();
 }

@@ -296,11 +296,18 @@ class CodeGenModule : public CodeGenTypeCache {
   /// order.
   llvm::DenseMap<const Decl*, unsigned> DelayedCXXInitPosition;
   
+  typedef std::pair<OrderGlobalInits, llvm::Function*> GlobalInitData;
+
+  struct GlobalInitPriorityCmp {
+    bool operator()(const GlobalInitData &LHS,
+                    const GlobalInitData &RHS) const {
+      return LHS.first.priority < RHS.first.priority;
+    }
+  };
+
   /// - Global variables with initializers whose order of initialization
   /// is set by init_priority attribute.
-  
-  SmallVector<std::pair<OrderGlobalInits, llvm::Function*>, 8> 
-    PrioritizedCXXGlobalInits;
+  SmallVector<GlobalInitData, 8> PrioritizedCXXGlobalInits;
 
   /// CXXGlobalDtors - Global destructor functions and arguments that need to
   /// run on termination.
@@ -548,6 +555,9 @@ public:
   /// GetAddrOfRTTIDescriptor - Get the address of the RTTI descriptor 
   /// for the given type.
   llvm::Constant *GetAddrOfRTTIDescriptor(QualType Ty, bool ForEH = false);
+
+  /// GetAddrOfUuidDescriptor - Get the address of a uuid descriptor .
+  llvm::Constant *GetAddrOfUuidDescriptor(const CXXUuidofExpr* E);
 
   /// GetAddrOfThunk - Get the address of the thunk for the given global decl.
   llvm::Constant *GetAddrOfThunk(GlobalDecl GD, const ThunkInfo &Thunk);
@@ -984,6 +994,9 @@ private:
   /// EmitCoverageFile - Emit the llvm.gcov metadata used to tell LLVM where
   /// to emit the .gcno and .gcda files in a way that persists in .bc files.
   void EmitCoverageFile();
+
+  /// Emits the initializer for a uuidof string.
+  llvm::Constant *EmitUuidofInitializer(StringRef uuidstr, QualType IIDType);
 
   /// MayDeferGeneration - Determine if the given decl can be emitted
   /// lazily; this is only relevant for definitions. The given decl
