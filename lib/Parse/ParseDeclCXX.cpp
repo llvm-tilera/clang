@@ -88,6 +88,12 @@ Decl *Parser::ParseNamespace(unsigned Context,
   }
 
   if (Tok.is(tok::equal)) {
+    if (Ident == 0) {
+      Diag(Tok, diag::err_expected_ident);
+      // Skip to end of the definition and eat the ';'.
+      SkipUntil(tok::semi);
+      return 0;
+    }
     if (!attrs.empty())
       Diag(attrTok, diag::err_unexpected_namespace_attributes_alias);
     if (InlineLoc.isValid())
@@ -696,9 +702,21 @@ SourceLocation Parser::ParseDecltypeSpecifier(DeclSpec &DS) {
                                                  0, /*IsDecltype=*/true);
     Result = ParseExpression();
     if (Result.isInvalid()) {
-      SkipUntil(tok::r_paren);
       DS.SetTypeSpecError();
-      return StartLoc;
+      if (SkipUntil(tok::r_paren, /*StopAtSemi=*/true, /*DontConsume=*/true)) {
+        EndLoc = ConsumeParen();
+      } else {
+        if (PP.isBacktrackEnabled() && Tok.is(tok::semi)) {
+          // Backtrack to get the location of the last token before the semi.
+          PP.RevertCachedTokens(2);
+          ConsumeToken(); // the semi.
+          EndLoc = ConsumeAnyToken();
+          assert(Tok.is(tok::semi));
+        } else {
+          EndLoc = Tok.getLocation();
+        }
+      }
+      return EndLoc;
     }
 
     // Match the ')'
@@ -2369,6 +2387,11 @@ void Parser::ParseCXXMemberSpecification(SourceLocation RecordLoc,
 
       if (Tok.is(tok::annot_pragma_pack)) {
         HandlePragmaPack();
+        continue;
+      }
+
+      if (Tok.is(tok::annot_pragma_align)) {
+        HandlePragmaAlign();
         continue;
       }
 
